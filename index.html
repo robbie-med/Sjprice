@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>St. John Medical Center - Cost Itemizer</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-top">
+                <h1>Hospital Cost Itemizer</h1>
+                <button id="dark-mode-toggle" class="btn btn-icon" title="Toggle dark mode">
+                    <span class="icon-sun">&#9728;&#65039;</span>
+                    <span class="icon-moon">&#127769;</span>
+                </button>
+            </div>
+            <div id="hospital-info" class="hospital-info"></div>
+        </header>
+
+        <main>
+            <section class="search-section">
+                <h2>Search Hospital Charges</h2>
+                <div class="search-controls">
+                    <input
+                        type="text"
+                        id="search-input"
+                        placeholder="Search by description or code..."
+                        autocomplete="off"
+                    >
+                    <select id="price-type">
+                        <option value="gross">Gross Charge</option>
+                        <option value="discounted_cash">Discounted Cash</option>
+                        <option value="payer">Insurance / Payer Rate</option>
+                    </select>
+                </div>
+                <div id="payer-select-wrapper" class="payer-select-wrapper" style="display:none;">
+                    <select id="payer-select">
+                        <option value="">-- Select Your Payer --</option>
+                    </select>
+                    <div id="payer-loading" class="payer-loading" style="display:none;">Loading payer rates...</div>
+                </div>
+                <div id="search-results" class="search-results"></div>
+            </section>
+
+            <section class="cart-section">
+                <h2>Your Itemized List</h2>
+                <div id="cart-items" class="cart-items">
+                    <p class="empty-cart">No items added yet. Search and add items above.</p>
+                </div>
+                <div class="cart-summary">
+                    <div class="summary-row">
+                        <span>Subtotal:</span>
+                        <span id="subtotal">$0.00</span>
+                    </div>
+                    <div class="summary-row total">
+                        <span>Total:</span>
+                        <span id="total">$0.00</span>
+                    </div>
+                    <button id="clear-cart" class="btn btn-secondary">Clear All</button>
+                    <button id="print-list" class="btn btn-primary">Print List</button>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Data last updated: <span id="last-updated">-</span></p>
+            <p class="disclaimer">This tool is for informational purposes only. Actual charges may vary.</p>
+            <p>Data source: <a href="https://healthcare.ascension.org/financial-assistance" target="_blank">Ascension St. John Medical Center</a></p>
+            <p>Built by <a href="https://robbiemed.org" target="_blank">robbiemed.org</a></p>
+        </footer>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
