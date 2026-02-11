@@ -1,4 +1,8 @@
 // St. John Medical Center - Cost Itemizer Application
+// Data format: items are arrays [desc, gross, dc, codes_str, drug_u, drug_t, setting, min, max]
+// Indices:      0     1      2    3           4       5       6       7    8
+
+const I = { DESC: 0, GROSS: 1, DC: 2, CODES: 3, DRUG_U: 4, DRUG_T: 5, SETTING: 6, MIN: 7, MAX: 8 };
 
 class DrugParser {
     static ROUTES = {
@@ -60,8 +64,6 @@ class DrugParser {
             result.strength = amount;
             result.strengthUnit = unit;
             result.isConcentration = true;
-            result.perAmount = perAmount;
-            result.perUnit = perUnit;
         } else {
             const strengthMatch = desc.match(/(\d+\.?\d*)\s*(MG|MCG|G|MEQ|UNITS?|%)/i);
             if (strengthMatch) {
@@ -76,33 +78,24 @@ class DrugParser {
         return result;
     }
 
-    static calculateUnitPrice(item, price) {
-        if (!item.drug || !price) return null;
+    static calculateUnitPrice(row, price) {
+        const drugU = row[I.DRUG_U];
+        const drugT = row[I.DRUG_T];
+        if (!drugU || !drugT || !price) return null;
 
-        const drugUnit = item.drug.u;
-        const drugType = item.drug.t;
-        const parsed = this.parse(item.d);
-        const typeLabel = this.DRUG_TYPE_MAP[drugType] || drugType;
+        const typeLabel = this.DRUG_TYPE_MAP[drugT] || drugT;
 
-        if (drugUnit && drugUnit > 1) {
-            return {
-                pricePerUnit: price / drugUnit,
-                packageInfo: `${drugUnit} ${typeLabel}`,
-                unitLabel: typeLabel
-            };
+        if (drugU > 1) {
+            return { pricePerUnit: price / drugU, unitLabel: typeLabel };
         }
-
-        return {
-            pricePerUnit: price,
-            packageInfo: `1 ${typeLabel}`,
-            unitLabel: typeLabel
-        };
+        return null;
     }
 }
 
 class HospitalCostItemizer {
     constructor() {
-        this.data = null;
+        this.meta = null;
+        this.items = [];       // flat array of all item rows
         this.payerList = null;
         this.currentPayerRates = null;
         this.cart = [];
@@ -183,28 +176,47 @@ class HospitalCostItemizer {
         this.searchResults.innerHTML = '<div class="loading">Loading hospital data...</div>';
 
         try {
-            const [baseResp, payersResp] = await Promise.all([
-                fetch('data/base.json'),
+            // Load meta + payers first (tiny files)
+            const [metaResp, payersResp] = await Promise.all([
+                fetch('data/meta.json'),
                 fetch('data/payers.json')
             ]);
+            if (!metaResp.ok || !payersResp.ok) throw new Error('Failed to load metadata');
 
-            if (!baseResp.ok || !payersResp.ok) throw new Error('Failed to load data');
-
-            this.data = await baseResp.json();
+            const metaData = await metaResp.json();
+            this.meta = metaData.meta;
+            const numChunks = metaData.chunks;
+            const totalItems = metaData.total_items;
             this.payerList = await payersResp.json();
 
             this.displayHospitalInfo();
             this.populatePayerSelect();
-            this.searchResults.innerHTML = `<p class="no-results">Search ${this.data.items.length.toLocaleString()} items by description or code...</p>`;
+
+            // Load all item chunks in parallel
+            this.searchResults.innerHTML = `<div class="loading">Loading ${totalItems.toLocaleString()} items...</div>`;
+            const chunkPromises = [];
+            for (let i = 0; i < numChunks; i++) {
+                chunkPromises.push(fetch(`data/items_${i}.json`).then(r => r.json()));
+            }
+
+            const chunks = await Promise.all(chunkPromises);
+            this.items = [];
+            for (const chunk of chunks) {
+                for (const item of chunk) {
+                    this.items.push(item);
+                }
+            }
+
+            this.searchResults.innerHTML = `<p class="no-results">Search ${this.items.length.toLocaleString()} items by description or code...</p>`;
         } catch (error) {
             console.error('Error loading data:', error);
-            this.searchResults.innerHTML = '<div class="no-results"><p>Error loading hospital data.</p></div>';
+            this.searchResults.innerHTML = '<div class="no-results"><p>Error loading hospital data. Please refresh the page.</p></div>';
         }
     }
 
     displayHospitalInfo() {
-        if (!this.data?.meta) return;
-        const m = this.data.meta;
+        if (!this.meta) return;
+        const m = this.meta;
         this.hospitalInfo.innerHTML = `
             <p><strong>${m.hospital_name || 'Hospital'}</strong></p>
             <p>${m.hospital_location || ''} &mdash; ${m.hospital_address || ''}</p>
@@ -250,17 +262,16 @@ class HospitalCostItemizer {
         }
     }
 
-    getItemPrice(item, itemIndex) {
+    getItemPrice(row, itemIndex) {
         if (this.priceType === 'payer' && this.currentPayerRates && itemIndex !== undefined) {
-            const rate = this.currentPayerRates[itemIndex];
+            const rate = this.currentPayerRates[String(itemIndex)];
             if (rate !== undefined) return rate;
-            // Fall back to gross if payer doesn't have this item
             return null;
         }
         if (this.priceType === 'discounted_cash') {
-            return item.dc || item.g || 0;
+            return row[I.DC] || row[I.GROSS] || 0;
         }
-        return item.g || 0;
+        return row[I.GROSS] || 0;
     }
 
     handleSearch() {
@@ -272,12 +283,11 @@ class HospitalCostItemizer {
         const query = this.searchInput.value.trim().toLowerCase();
 
         if (!query || query.length < 2) {
-            const count = this.data?.items?.length || 0;
-            this.searchResults.innerHTML = `<p class="no-results">Enter at least 2 characters to search ${count.toLocaleString()} items...</p>`;
+            this.searchResults.innerHTML = `<p class="no-results">Enter at least 2 characters to search ${this.items.length.toLocaleString()} items...</p>`;
             return;
         }
 
-        if (!this.data?.items) {
+        if (!this.items.length) {
             this.searchResults.innerHTML = '<p class="no-results">No data available.</p>';
             return;
         }
@@ -285,14 +295,14 @@ class HospitalCostItemizer {
         const terms = query.split(/\s+/);
         const results = [];
 
-        for (let i = 0; i < this.data.items.length; i++) {
-            const item = this.data.items[i];
-            const desc = (item.d || '').toLowerCase();
-            const codes = (item.codes || []).map(c => (c.c || '').toLowerCase()).join(' ');
+        for (let i = 0; i < this.items.length; i++) {
+            const row = this.items[i];
+            const desc = (row[I.DESC] || '').toLowerCase();
+            const codes = (row[I.CODES] || '').toLowerCase();
             const searchText = desc + ' ' + codes;
 
             if (terms.every(t => searchText.includes(t))) {
-                results.push({ item, index: i });
+                results.push({ row, index: i });
                 if (results.length >= 100) break;
             }
         }
@@ -300,13 +310,13 @@ class HospitalCostItemizer {
         this.displaySearchResults(results);
     }
 
-    getItemType(item) {
-        const desc = (item.d || '').toLowerCase();
-        const codes = item.codes || [];
-        const hasCPT = codes.some(c => c.t === 'CPT');
-        const hasHCPCS = codes.some(c => c.t === 'HCPCS');
-        const hasRC = codes.some(c => c.t === 'RC');
-        const hasDrug = !!item.drug;
+    getItemType(row) {
+        const desc = (row[I.DESC] || '').toLowerCase();
+        const codes = row[I.CODES] || '';
+        const hasCPT = codes.includes('CPT:');
+        const hasHCPCS = codes.includes('HCPCS:');
+        const hasRC = codes.includes('RC:');
+        const hasDrug = row[I.DRUG_U] && row[I.DRUG_T];
 
         if (hasDrug || hasHCPCS) return { type: 'pharmacy', label: 'Rx' };
         if (desc.includes('room') || desc.includes('bed')) return { type: 'room', label: 'Room' };
@@ -323,18 +333,16 @@ class HospitalCostItemizer {
 
         const priceLabel = this.getPriceLabel();
 
-        const html = results.map(({ item, index }) => {
-            const price = this.getItemPrice(item, index);
-            const codeInfo = this.getCodeInfo(item);
-            const drugBadges = this.getDrugBadges(item, price);
-            const itemType = this.getItemType(item);
-            const unitPriceInfo = DrugParser.calculateUnitPrice(item, price);
+        const html = results.map(({ row, index }) => {
+            const price = this.getItemPrice(row, index);
+            const codeInfo = this.getCodeDisplay(row);
+            const drugBadges = this.getDrugBadges(row, price);
+            const itemType = this.getItemType(row);
+            const unitPriceInfo = DrugParser.calculateUnitPrice(row, price);
 
             let unitPriceHtml = '';
-            if (unitPriceInfo && unitPriceInfo.pricePerUnit !== null && price) {
-                if (unitPriceInfo.packageInfo && item.drug && item.drug.u > 1) {
-                    unitPriceHtml = `<div class="item-unit-price">${this.formatCurrency(unitPriceInfo.pricePerUnit)}/${unitPriceInfo.unitLabel}</div>`;
-                }
+            if (unitPriceInfo) {
+                unitPriceHtml = `<div class="item-unit-price">${this.formatCurrency(unitPriceInfo.pricePerUnit)}/${unitPriceInfo.unitLabel}</div>`;
             }
 
             let priceHtml;
@@ -344,16 +352,15 @@ class HospitalCostItemizer {
                 priceHtml = `<div class="item-price">${this.formatCurrency(price)}</div>${unitPriceHtml}`;
             }
 
-            // Show min/max range if available
             let rangeHtml = '';
-            if (item.min !== undefined && item.max !== undefined && item.min !== item.max) {
-                rangeHtml = `<div class="item-range">Range: ${this.formatCurrency(item.min)} - ${this.formatCurrency(item.max)}</div>`;
+            if (row[I.MIN] != null && row[I.MAX] != null && row[I.MIN] !== row[I.MAX]) {
+                rangeHtml = `<div class="item-range">Range: ${this.formatCurrency(row[I.MIN])} - ${this.formatCurrency(row[I.MAX])}</div>`;
             }
 
-            // Setting badge
             let settingHtml = '';
-            if (item.s && item.s !== 'BOTH') {
-                settingHtml = `<span class="setting-badge ${item.s.toLowerCase()}">${item.s}</span>`;
+            const setting = row[I.SETTING];
+            if (setting && setting !== 'BOTH') {
+                settingHtml = `<span class="setting-badge ${setting.toLowerCase()}">${setting}</span>`;
             }
 
             return `
@@ -362,7 +369,7 @@ class HospitalCostItemizer {
                         <div class="item-description">
                             <span class="item-type-badge ${itemType.type}">${itemType.label}</span>
                             ${settingHtml}
-                            ${this.escapeHtml(item.d)}
+                            ${this.escapeHtml(row[I.DESC])}
                         </div>
                         ${codeInfo ? `<div class="item-code">${codeInfo}</div>` : ''}
                         ${drugBadges}
@@ -380,8 +387,6 @@ class HospitalCostItemizer {
             <div class="results-count">Found ${results.length} item${results.length !== 1 ? 's' : ''} &mdash; showing ${priceLabel}</div>
             ${html}
         `;
-
-        this.currentResults = results;
     }
 
     getPriceLabel() {
@@ -395,11 +400,31 @@ class HospitalCostItemizer {
         return this.priceType === 'discounted_cash' ? 'Discounted Cash prices' : 'Gross Charge prices';
     }
 
-    getDrugBadges(item, price) {
-        const parsed = DrugParser.parse(item.d);
-        const drug = item.drug;
+    getCodeDisplay(row) {
+        const codes = row[I.CODES];
+        if (!codes) return '';
+        // codes is "CDM:617036415|CPT:36415"
+        const parts = codes.split('|');
+        const priorityTypes = ['CPT', 'HCPCS', 'CDM', 'RC', 'MS-DRG'];
+        parts.sort((a, b) => {
+            const at = a.split(':')[0];
+            const bt = b.split(':')[0];
+            const ai = priorityTypes.indexOf(at);
+            const bi = priorityTypes.indexOf(bt);
+            return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+        });
+        return parts.map(p => {
+            const [type, code] = p.split(':');
+            return `${type}: ${code}`;
+        }).join(' | ');
+    }
 
-        if (!parsed && !drug) return '';
+    getDrugBadges(row, price) {
+        const parsed = DrugParser.parse(row[I.DESC]);
+        const drugU = row[I.DRUG_U];
+        const drugT = row[I.DRUG_T];
+
+        if (!parsed && !drugU) return '';
 
         let badges = [];
 
@@ -417,32 +442,19 @@ class HospitalCostItemizer {
             badges.push(`<span class="dose-badge form">${parsed.formFull}</span>`);
         }
 
-        if (drug?.u && drug?.t) {
-            const typeLabel = DrugParser.DRUG_TYPE_MAP[drug.t] || drug.t;
-            badges.push(`<span class="dose-badge package">${drug.u} ${typeLabel}</span>`);
+        if (drugU && drugT) {
+            const typeLabel = DrugParser.DRUG_TYPE_MAP[drugT] || drugT;
+            badges.push(`<span class="dose-badge package">${drugU} ${typeLabel}</span>`);
         }
 
         if (badges.length === 0) return '';
         return `<div class="item-dose-info">${badges.join('')}</div>`;
     }
 
-    getCodeInfo(item) {
-        if (!item.codes || item.codes.length === 0) return '';
-        const priorityTypes = ['CPT', 'HCPCS', 'CDM', 'RC', 'MS-DRG'];
-        const sorted = [...item.codes].sort((a, b) => {
-            const ai = priorityTypes.indexOf(a.t);
-            const bi = priorityTypes.indexOf(b.t);
-            return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-        });
-        return sorted.map(c => `${c.t}: ${c.c}`).join(' | ');
-    }
-
     addToCart(itemIndex) {
-        if (!this.data?.items?.[itemIndex]) return;
+        if (!this.items[itemIndex]) return;
 
-        const item = this.data.items[itemIndex];
         const existing = this.cart.findIndex(c => c.idx === itemIndex);
-
         if (existing !== -1) {
             this.cart[existing].qty++;
         } else {
@@ -490,17 +502,18 @@ class HospitalCostItemizer {
         let subtotal = 0;
 
         const html = this.cart.map((cartItem, cartIndex) => {
-            const item = this.data.items[cartItem.idx];
-            const price = this.getItemPrice(item, cartItem.idx);
+            const row = this.items[cartItem.idx];
+            const price = this.getItemPrice(row, cartItem.idx);
             const lineTotal = (price || 0) * cartItem.qty;
             subtotal += lineTotal;
 
-            const codeInfo = this.getCodeInfo(item);
-            const drug = item.drug;
+            const codeInfo = this.getCodeDisplay(row);
+            const drugU = row[I.DRUG_U];
+            const drugT = row[I.DRUG_T];
             let doseInfo = '';
-            if (drug?.u && drug?.t) {
-                const typeLabel = DrugParser.DRUG_TYPE_MAP[drug.t] || drug.t;
-                doseInfo = `${drug.u} ${typeLabel}`;
+            if (drugU && drugT) {
+                const typeLabel = DrugParser.DRUG_TYPE_MAP[drugT] || drugT;
+                doseInfo = `${drugU} ${typeLabel}`;
             }
 
             const priceDisplay = price === null
@@ -510,7 +523,7 @@ class HospitalCostItemizer {
             return `
                 <div class="cart-item">
                     <div class="cart-item-info">
-                        <div class="cart-item-description">${this.escapeHtml(item.d)}</div>
+                        <div class="cart-item-description">${this.escapeHtml(row[I.DESC])}</div>
                         ${codeInfo ? `<div class="cart-item-code">${codeInfo}</div>` : ''}
                         ${doseInfo ? `<div class="cart-item-dose">${doseInfo}</div>` : ''}
                     </div>
